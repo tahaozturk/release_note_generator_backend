@@ -38,7 +38,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="D:\projects\ai_release_notes\backend\venv"
+VIRTUAL_ENV="D:\projects\ai_release_notes\release_note_generator_backend\venv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"
