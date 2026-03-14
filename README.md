@@ -1,4 +1,4 @@
-# Release Note Architect - Backend
+# Release Note Generator - Backend
 
 This is the FastAPI backend that processes payloads from the GitHub Action, generates AI-powered release notes (via OpenRouter or similar), and serves them to the web dashboard.
 
