@@ -1,6 +1,7 @@
 import os
 import json
 import httpx
+import re
 
 try:
     from dotenv import load_dotenv
@@ -111,33 +112,54 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
         content = data["choices"][0]["message"]["content"]
         
         # Robust parsing for AI responses
-        final_notes = {
-            "technical": content,
-            "marketing": "Update available.",
-            "hype": "New version is out! 🚀"
-        }
+        final_notes = {}
         
+        # 1. Try parsing the whole content as JSON first
         try:
-            # Try parsing the raw content first
-            parsed = json.loads(content)
+            parsed = json.loads(content.strip())
             if isinstance(parsed, dict):
-                final_notes.update(parsed)
+                final_notes = parsed
         except json.JSONDecodeError:
-            try:
-                # Try stripping markdown code blocks
-                cleaned = content.replace("```json", "").replace("```", "").strip()
-                parsed = json.loads(cleaned)
-                if isinstance(parsed, dict):
-                    final_notes.update(parsed)
-            except Exception as e:
-                pass
-                
-        # Final formatting: ensure all keys are Markdown strings (never raw dicts)
-        for key in ["technical", "marketing", "hype"]:
-            if key not in final_notes:
-                final_notes[key] = content[:500] if key == "technical" else "Update available."
-            else:
-                # Use our formatter to bridge structured data -> Markdown strings
-                final_notes[key] = format_as_markdown(final_notes[key])
-                
-        return final_notes
+            pass
+
+        # 2. If that fails, try extracting from a markdown block or finding the first { and last }
+        if not final_notes:
+            # Try finding the first { and last }
+            match = re.search(r'(\{.*\})', content, re.DOTALL)
+            if match:
+                try:
+                    cleaned = match.group(1).strip()
+                    parsed = json.loads(cleaned)
+                    if isinstance(parsed, dict):
+                        final_notes = parsed
+                except json.JSONDecodeError:
+                    # Try cleaning common AI "oopsies" like trailing commas
+                    try:
+                        # Very naive trailing comma fix
+                        cleaned_v2 = re.sub(r',\s*\}', '}', cleaned)
+                        parsed = json.loads(cleaned_v2)
+                        if isinstance(parsed, dict):
+                            final_notes = parsed
+                    except:
+                        pass
+
+        # 3. Final formatting: ensure all keys are Markdown strings
+        # We look for our expected keys
+        result = {
+            "technical": "Draft not generated properly.",
+            "marketing": "Update available.",
+            "hype": "New version out! 🚀"
+        }
+
+        # If we successfully parsed a dict, use it
+        if final_notes:
+            for key in ["technical", "marketing", "hype"]:
+                if key in final_notes:
+                    result[key] = format_as_markdown(final_notes[key])
+        else:
+            # Absolute fallback: if we couldn't parse JSON, the AI likely just gave us a string
+            # We put it in technical if it's long, otherwise use defaults
+            if len(content) > 50:
+                result["technical"] = content
+            
+        return result
