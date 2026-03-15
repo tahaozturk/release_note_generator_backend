@@ -2,9 +2,15 @@ import os
 import httpx
 import json
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    
     prompt = f"""
     You are an expert technical writer and developer advocate.
     I have a list of commits and file diffs for a new release.
@@ -25,7 +31,8 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
     {diffs_text[:5000]}
     """
     
-    if not OPENROUTER_API_KEY:
+    if not api_key:
+        print("DEBUG: API Key not found. Falling back to mocked notes.")
         # Fallback for testing if no key provided
         return {
             "technical": "## Features\n- Mocked feature\n## Fixes\n- Mocked fix",
@@ -37,7 +44,7 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
         response = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Authorization": f"Bearer {api_key}",
                 "HTTP-Referer": "http://localhost:8000",
                 "Content-Type": "application/json"
             },
