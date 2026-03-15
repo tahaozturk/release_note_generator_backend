@@ -42,7 +42,7 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
                 "Content-Type": "application/json"
             },
             json={
-                "model": "openai/gpt-4o-mini", # Standard fast, smart model
+                "model": "openai/gpt-oss-120b:free", # Standard fast, smart model
                 "messages": [
                     {"role": "user", "content": prompt}
                 ]
