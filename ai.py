@@ -1,12 +1,17 @@
 import os
 import httpx
-import json
 
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass
+    # Manual fallback if dotenv not installed
+    if os.path.exists(".env"):
+        with open(".env") as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
 async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -45,26 +50,57 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "HTTP-Referer": "http://localhost:8000",
                 "Content-Type": "application/json"
             },
             json={
-                "model": "openai/gpt-oss-120b:free", # Standard fast, smart model
+                "model": "openrouter/auto", # Automatically picks a good model
                 "messages": [
                     {"role": "user", "content": prompt}
                 ]
             },
-            timeout=30.0
+            timeout=60.0
         )
+        
+        if response.status_code != 200:
+            print(f"DEBUG: OpenRouter error {response.status_code}: {response.text}")
         
         response.raise_for_status()
         data = response.json()
-        
+            
+        if "choices" not in data or not data["choices"]:
+             return {
+                "technical": "Error: No response from AI model",
+                "marketing": "AI model did not return any choices.",
+                "hype": "Oops! AI is shy today! 🙈"
+            }
+            
         content = data["choices"][0]["message"]["content"]
-        # Try to parse the json
+        
+        # Robust parsing for AI responses
+        final_notes = {
+            "technical": content,
+            "marketing": "Update available.",
+            "hype": "New version is out! 🚀"
+        }
+        
         try:
-            return json.loads(content)
+            # Try parsing the raw content first
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                final_notes.update(parsed)
         except json.JSONDecodeError:
-            # If it wrapped in markdown occasionally
-            cleaned = content.replace("```json", "").replace("```", "").strip()
-            return json.loads(cleaned)
+            try:
+                # Try stripping markdown code blocks
+                cleaned = content.replace("```json", "").replace("```", "").strip()
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict):
+                    final_notes.update(parsed)
+            except Exception as e:
+                pass
+                
+        # Final safety check: ensure all keys are there
+        for key in ["technical", "marketing", "hype"]:
+             if key not in final_notes:
+                 final_notes[key] = content[:500] if key == "technical" else "Update available."
+                 
+        return final_notes
