@@ -1,4 +1,5 @@
 import os
+import json
 import httpx
 
 try:
@@ -98,9 +99,12 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
             except Exception as e:
                 pass
                 
-        # Final safety check: ensure all keys are there
+        # Final safety check: ensure all keys are strings (never dicts)
         for key in ["technical", "marketing", "hype"]:
-             if key not in final_notes:
-                 final_notes[key] = content[:500] if key == "technical" else "Update available."
-                 
+            if key not in final_notes:
+                final_notes[key] = content[:500] if key == "technical" else "Update available."
+            elif not isinstance(final_notes[key], str):
+                # AI returned a nested object instead of a plain string — serialize it
+                final_notes[key] = json.dumps(final_notes[key], ensure_ascii=False)
+                
         return final_notes
