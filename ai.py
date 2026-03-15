@@ -14,21 +14,55 @@ except ImportError:
                     k, v = line.strip().split("=", 1)
                     os.environ[k.strip()] = v.strip().strip('"').strip("'")
 
+def format_as_markdown(data) -> str:
+    """
+    Intelligently converts AI-generated structured data (dicts/lists) into clean Markdown.
+    """
+    if isinstance(data, str):
+        return data
+    
+    if isinstance(data, list):
+        if not data:
+            return "No changes reported."
+        return "\n".join([f"- {str(item)}" for item in data])
+    
+    if isinstance(data, dict):
+        lines = []
+        for key, value in data.items():
+            # If the value is a list of changes
+            if isinstance(value, list) and value:
+                lines.append(f"### {key}")
+                lines.append("\n".join([f"- {str(item)}" for item in value]))
+                lines.append("")
+            # If the value is a sub-dict
+            elif isinstance(value, dict) and value:
+                lines.append(f"### {key}")
+                lines.append(format_as_markdown(value))
+                lines.append("")
+            # Otherwise just a string or other primitive
+            else:
+                lines.append(f"**{key}**: {str(value)}")
+        
+        return "\n".join(lines).strip()
+    
+    return str(data)
+
 async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     
     prompt = f"""
     You are an expert technical writer and developer advocate.
     I have a list of commits and file diffs for a new release.
-    Please analyze them and categorize the changes into "Features", "Fixes", and "Internal/Refactor".
+    Please analyze them and categorize the changes.
     
-    Then, write three separate versions of release notes:
-    1. "technical": A standard, engineer-focused release note.
+    Write three separate versions of release notes:
+    1. "technical": A standard, engineer-focused release note with sections for Features, Fixes, and Internal changes.
     2. "marketing": A user-friendly, benefit-focused release note suitable for an App Store update.
     3. "hype": A fun, exciting, emoji-filled note suitable for Twitter or Discord.
     
     Return the response strictly as a JSON object with keys: "technical", "marketing", "hype".
-    Do not output any markdown formatting around the JSON block. Just raw JSON.
+    The values for these keys should ideally be Markdown strings. 
+    Do not output any markdown formatting around the JSON response block itself. Just raw JSON.
     
     Commits:
     {commits_text}
@@ -39,7 +73,6 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
     
     if not api_key:
         print("DEBUG: API Key not found. Falling back to mocked notes.")
-        # Fallback for testing if no key provided
         return {
             "technical": "## Features\n- Mocked feature\n## Fixes\n- Mocked fix",
             "marketing": "We fixed some bugs and added great new features!",
@@ -54,7 +87,7 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
                 "Content-Type": "application/json"
             },
             json={
-                "model": "openrouter/auto", # Automatically picks a good model
+                "model": "openrouter/auto",
                 "messages": [
                     {"role": "user", "content": prompt}
                 ]
@@ -99,12 +132,12 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
             except Exception as e:
                 pass
                 
-        # Final safety check: ensure all keys are strings (never dicts)
+        # Final formatting: ensure all keys are Markdown strings (never raw dicts)
         for key in ["technical", "marketing", "hype"]:
             if key not in final_notes:
                 final_notes[key] = content[:500] if key == "technical" else "Update available."
-            elif not isinstance(final_notes[key], str):
-                # AI returned a nested object instead of a plain string — serialize it
-                final_notes[key] = json.dumps(final_notes[key], ensure_ascii=False)
+            else:
+                # Use our formatter to bridge structured data -> Markdown strings
+                final_notes[key] = format_as_markdown(final_notes[key])
                 
         return final_notes
