@@ -36,8 +36,19 @@ app.add_middleware(
 
 def get_db():
     Base.metadata.create_all(bind=engine)
+    # Simple migration for SQLite: add cached columns if they don't exist
     db = SessionLocal()
     try:
+        from sqlalchemy import text
+        try:
+            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_appstore_note TEXT"))
+            db.commit()
+        except: pass
+        try:
+            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_googleplay_note TEXT"))
+            db.commit()
+        except: pass
+        
         yield db
     finally:
         db.close()
@@ -106,9 +117,32 @@ def delete_draft(draft_id: int, db: Session = Depends(get_db)):
     raise HTTPException(status_code=404, detail="Draft not found")
 
 @app.post("/reformat")
-async def api_reformat_content(req: ReformatRequest):
+async def api_reformat_content(req: ReformatRequest, db: Session = Depends(get_db)):
     try:
+        draft = db.query(ReleaseDraft).filter(ReleaseDraft.id == req.draft_id).first()
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        
+        # Check Cache
+        if req.platform == "appstore" and draft.cached_appstore_note:
+            return {"content": draft.cached_appstore_note}
+        if req.platform == "googleplay" and draft.cached_googleplay_note:
+            return {"content": draft.cached_googleplay_note}
+        if req.platform == "markdown":
+            # For markdown, we just use the marketing note as base or whatever the user edited
+            # But usually markdown is the default state
+            return {"content": req.content}
+
+        # Call AI if not cached
         reformatted = await reformat_content(req.content, req.platform)
+        
+        # Save to Cache
+        if req.platform == "appstore":
+            draft.cached_appstore_note = reformatted
+        elif req.platform == "googleplay":
+            draft.cached_googleplay_note = reformatted
+        
+        db.commit()
         return {"content": reformatted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

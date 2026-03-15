@@ -172,7 +172,7 @@ async def reformat_content(content: str, platform: str) -> str:
 
     platform_rules = {
         "appstore": "Focused on user experience, professional and welcoming. Use simple bullets or paragraphs. Max 4000 chars.",
-        "googleplay": "Clear, concise, and functional. Max 500 characters for 'What's New' section.",
+        "googleplay": "Clear, concise, and functional. IMPORTANT: Surround the content with <en-US> tags (or appropriate locale if mentioned). Max 500 characters for 'What's New' section.",
         "markdown": "Clean Markdown formatting with headers and bullet points."
     }
     

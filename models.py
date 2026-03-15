@@ -16,6 +16,11 @@ class ReleaseDraft(Base):
     technical_note = Column(Text)
     marketing_note = Column(Text)
     hype_note = Column(Text)
+    
+    # Caching reformatted versions
+    cached_appstore_note = Column(Text, nullable=True)
+    cached_googleplay_note = Column(Text, nullable=True)
+    
     status = Column(String, default="pending")
 
 # Pydantic Schemas for API Input
@@ -41,6 +46,7 @@ class ReleasePayload(BaseModel):
     files: List[FileInput]
 
 class ReformatRequest(BaseModel):
+    draft_id: int
     content: str
     platform: str # "markdown", "appstore", "googleplay"
 
