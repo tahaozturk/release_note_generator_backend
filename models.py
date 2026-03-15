@@ -19,7 +19,9 @@ class ReleaseDraft(Base):
     
     # Caching reformatted versions
     cached_appstore_note = Column(Text, nullable=True)
+    cached_appstore_source = Column(Text, nullable=True) # The exact markdown that generated this cached note
     cached_googleplay_note = Column(Text, nullable=True)
+    cached_googleplay_source = Column(Text, nullable=True)
     
     status = Column(String, default="pending")
 

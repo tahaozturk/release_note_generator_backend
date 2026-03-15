@@ -45,7 +45,15 @@ def get_db():
             db.commit()
         except: pass
         try:
+            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_appstore_source TEXT"))
+            db.commit()
+        except: pass
+        try:
             db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_googleplay_note TEXT"))
+            db.commit()
+        except: pass
+        try:
+            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_googleplay_source TEXT"))
             db.commit()
         except: pass
         
@@ -123,24 +131,24 @@ async def api_reformat_content(req: ReformatRequest, db: Session = Depends(get_d
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
         
-        # Check Cache
-        if req.platform == "appstore" and draft.cached_appstore_note:
+        # Check Cache (Ensure the generated output matches the *exact* input source)
+        if req.platform == "appstore" and draft.cached_appstore_note and draft.cached_appstore_source == req.content:
             return {"content": draft.cached_appstore_note}
-        if req.platform == "googleplay" and draft.cached_googleplay_note:
+        if req.platform == "googleplay" and draft.cached_googleplay_note and draft.cached_googleplay_source == req.content:
             return {"content": draft.cached_googleplay_note}
         if req.platform == "markdown":
-            # For markdown, we just use the marketing note as base or whatever the user edited
-            # But usually markdown is the default state
             return {"content": req.content}
 
-        # Call AI if not cached
+        # Call AI if not cached or source changed
         reformatted = await reformat_content(req.content, req.platform)
         
-        # Save to Cache
+        # Save to Cache and track source
         if req.platform == "appstore":
             draft.cached_appstore_note = reformatted
+            draft.cached_appstore_source = req.content
         elif req.platform == "googleplay":
             draft.cached_googleplay_note = reformatted
+            draft.cached_googleplay_source = req.content
         
         db.commit()
         return {"content": reformatted}
