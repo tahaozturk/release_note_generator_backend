@@ -3,6 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional
 
 # Database setup
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -24,7 +25,6 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Release Note Architect API")
 
-
 # Setup CORS for Frontend
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +34,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def get_db():
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
@@ -42,6 +41,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+@app.get("/")
+async def root():
+    return {"message": "Release Note Architect Backend is Running", "docs": "/docs"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
 
 @app.post("/draft-release")
 async def create_draft_release(payload: ReleasePayload):
