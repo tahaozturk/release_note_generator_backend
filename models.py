@@ -39,3 +39,11 @@ class ReleasePayload(BaseModel):
     head_ref: str
     commits: List[CommitInput]
     files: List[FileInput]
+
+class ReformatRequest(BaseModel):
+    content: str
+    platform: str # "markdown", "appstore", "googleplay"
+
+class TranslateRequest(BaseModel):
+    content: str
+    target_languages: List[str]

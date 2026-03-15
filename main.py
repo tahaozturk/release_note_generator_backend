@@ -19,8 +19,8 @@ else:
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-from models import Base, ReleaseDraft, CommitInput, FileInput, ReleasePayload
-from ai import get_generated_notes
+from models import Base, ReleaseDraft, CommitInput, FileInput, ReleasePayload, ReformatRequest, TranslateRequest
+from ai import get_generated_notes, reformat_content, translate_content
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Release Note Architect API")
@@ -104,3 +104,19 @@ def delete_draft(draft_id: int, db: Session = Depends(get_db)):
         db.commit()
         return {"message": "Deleted"}
     raise HTTPException(status_code=404, detail="Draft not found")
+
+@app.post("/reformat")
+async def api_reformat_content(req: ReformatRequest):
+    try:
+        reformatted = await reformat_content(req.content, req.platform)
+        return {"content": reformatted}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/translate")
+async def api_translate_content(req: TranslateRequest):
+    try:
+        translations = await translate_content(req.content, req.target_languages)
+        return translations
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

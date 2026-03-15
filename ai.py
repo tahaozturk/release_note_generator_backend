@@ -2,6 +2,7 @@ import os
 import json
 import httpx
 import re
+from typing import List
 
 try:
     from dotenv import load_dotenv
@@ -163,3 +164,78 @@ async def get_generated_notes(commits_text: str, diffs_text: str) -> dict:
                 result["technical"] = content
             
         return result
+
+async def reformat_content(content: str, platform: str) -> str:
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return f"[MOCK] Reformatted for {platform}: {content[:100]}..."
+
+    platform_rules = {
+        "appstore": "Focused on user experience, professional and welcoming. Use simple bullets or paragraphs. Max 4000 chars.",
+        "googleplay": "Clear, concise, and functional. Max 500 characters for 'What's New' section.",
+        "markdown": "Clean Markdown formatting with headers and bullet points."
+    }
+    
+    prompt = f"""
+    Reformat the following release notes specifically for the {platform.upper()} platform.
+    
+    Platform Guidelines:
+    {platform_rules.get(platform, "Standard formatting.")}
+    
+    Notes to reformat:
+    {content}
+    
+    Output ONLY the reformatted text. No coversational filler.
+    """
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": "openrouter/auto",
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=45.0
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
+
+async def translate_content(content: str, target_languages: List[str]) -> dict:
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        return {lang: f"[MOCK Translation ({lang})]: {content[:50]}..." for lang in target_languages}
+
+    prompt = f"""
+    Translate the following release notes into these languages: {", ".join(target_languages)}.
+    
+    Notes to translate:
+    {content}
+    
+    Return the result strictly as a JSON object where the keys are the language names and values are the translated text.
+    Do not output any markdown formatting around the JSON block. Just raw JSON.
+    """
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": "openrouter/auto",
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=90.0
+        )
+        response.raise_for_status()
+        data = response.json()
+        raw_result = data["choices"][0]["message"]["content"].strip()
+        
+        try:
+            # Reuse logic for finding JSON block
+            match = re.search(r'(\{.*\})', raw_result, re.DOTALL)
+            if match:
+                return json.loads(match.group(1).strip())
+            return json.loads(raw_result)
+        except:
+            return {"error": "Failed to parse translations", "raw": raw_result}
