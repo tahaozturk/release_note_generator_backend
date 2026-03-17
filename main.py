@@ -184,8 +184,19 @@ async def github_webhook(
         base = payload.get("before")
         head = payload.get("after")
         
+        print(f"Processing PUSH event: {owner}/{repo_name} | {base} -> {head}")
+        
+        # Fresh branch/Initial push
         if base == "0000000000000000000000000000000000000000":
-            return {"status": "ignored", "reason": "Fresh branch"}
+            # Instead of ignoring, we try to compare with the parent of head
+            # GitHub supports 'HEAD^' or just fetching the commit alone, 
+            # but comparison works best with SHAs.
+            # We'll try to fetch the commit data directly if base is zero.
+            print(f"Initial push detected for {repo_name}. Attempting to fetch head commit data.")
+            # We'll let get_repo_compare attempt to handle it or we can fallback
+            # to comparing head with itself or head^.
+            # For simplicity in this PR, we'll try comparing head^...head if it's a commit
+            base = f"{head}^" 
 
         try:
             # Fetch compare data from GitHub

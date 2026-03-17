@@ -70,6 +70,8 @@ async def get_installation_token(installation_id: int) -> str:
     
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, headers=headers)
+        if resp.status_code != 201:
+            print(f"Error fetching installation token: {resp.status_code} {resp.text}")
         resp.raise_for_status()
         return resp.json()["token"]
 
@@ -85,7 +87,10 @@ async def get_repo_compare(owner: str, repo: str, base: str, head: str, installa
     }
     
     async with httpx.AsyncClient() as client:
+        print(f"Fetching comparison: {url}")
         resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            print(f"Error fetching comparison for {owner}/{repo}: {resp.status_code} {resp.text}")
         resp.raise_for_status()
         return resp.json()
 
