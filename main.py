@@ -28,7 +28,11 @@ app = FastAPI(title="Release Note Architect API")
 # Setup CORS for Frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Since this is a local tool 
+    allow_origins=[
+        "http://localhost:3000",
+        "https://release-note-generator-frontend.vercel.app",
+        "https://release-note-generator-frontend.vercel.app/", # With slash just in case
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
