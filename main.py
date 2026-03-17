@@ -4,7 +4,10 @@ from sqlalchemy.orm import sessionmaker, Session
 from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-import github_app as gh_app
+try:
+    import github_app as gh_app
+except ImportError:
+    gh_app = None
 import hmac
 import hashlib
 import json
@@ -134,6 +137,10 @@ async def github_webhook(
     x_hub_signature_256: str = Header(None)
 ):
     body = await request.body()
+    
+    # Check if dependencies are loaded
+    if gh_app is None:
+        return {"status": "error", "reason": "GitHub App dependencies (PyJWT/cryptography) are not installed on the server."}
     
     # 1. Verify Signature (Graceful fallback if secret is missing)
     if not gh_app.verify_signature(body, x_hub_signature_256):
