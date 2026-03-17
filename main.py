@@ -135,9 +135,11 @@ async def github_webhook(
 ):
     body = await request.body()
     
-    # 1. Verify Signature
+    # 1. Verify Signature (Graceful fallback if secret is missing)
     if not gh_app.verify_signature(body, x_hub_signature_256):
-        raise HTTPException(status_code=401, detail="Invalid signature")
+        # We only strictly enforce if the secret is configured
+        if os.environ.get("GITHUB_WEBHOOK_SECRET"):
+            raise HTTPException(status_code=401, detail="Invalid signature")
     
     try:
         payload = json.loads(body)
@@ -152,9 +154,12 @@ async def github_webhook(
         print(f"App {action} on installation {install_id} for Repos: {repos}")
         return {"status": "accepted"}
 
-    # 3. Handle Push (Primary trigger for release notes)
+    # 3. Handle Push
     if x_github_event == "push":
-        # Only trigger on default branch (optional, but standard for SaaS releases)
+        # Check if App config is present before attempting to use it
+        if not os.environ.get("GITHUB_APP_ID") or not os.environ.get("GITHUB_PRIVATE_KEY"):
+            return {"status": "error", "reason": "GitHub App configuration missing on server. Webhook cannot be processed."}
+
         ref = payload.get("ref", "")
         repo_data = payload.get("repository", {})
         default_branch = repo_data.get("default_branch", "main")
@@ -169,33 +174,34 @@ async def github_webhook(
         if not installation_id:
              return {"status": "error", "reason": "No installation ID found"}
 
-        # Compare push with previous commit
         base = payload.get("before")
         head = payload.get("after")
         
-        # Fresh branch/no before
         if base == "0000000000000000000000000000000000000000":
             return {"status": "ignored", "reason": "Fresh branch"}
 
-        # Fetch compare data from GitHub
-        compare_data = await gh_app.get_repo_compare(owner, repo_name, base, head, installation_id)
-        
-        # Transform to our internal model
-        internal_payload_dict = gh_app.parse_compare_payload(compare_data)
-        internal_payload_dict["repository"] = f"{owner}/{repo_name}"
-        internal_payload_dict["base_ref"] = base[:7]
-        internal_payload_dict["head_ref"] = head[:7]
-        
-        internal_payload = ReleasePayload(**internal_payload_dict)
-        
-        # Process and save
-        db = SessionLocal()
         try:
-            await process_release_payload(internal_payload, db)
-        finally:
-            db.close()
+            # Fetch compare data from GitHub
+            compare_data = await gh_app.get_repo_compare(owner, repo_name, base, head, installation_id)
             
-        return {"status": "success", "triggered": True}
+            # Transform and save
+            internal_payload_dict = gh_app.parse_compare_payload(compare_data)
+            internal_payload_dict["repository"] = f"{owner}/{repo_name}"
+            internal_payload_dict["base_ref"] = base[:7]
+            internal_payload_dict["head_ref"] = head[:7]
+            
+            internal_payload = ReleasePayload(**internal_payload_dict)
+            
+            db = SessionLocal()
+            try:
+                await process_release_payload(internal_payload, db)
+            finally:
+                db.close()
+                
+            return {"status": "success", "triggered": True}
+        except Exception as e:
+            print(f"Error processing webhook: {e}")
+            return {"status": "error", "reason": str(e)}
 
     return {"status": "ignored", "event": x_github_event}
 

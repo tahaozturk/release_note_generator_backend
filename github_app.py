@@ -15,36 +15,47 @@ WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 def verify_signature(payload: bytes, signature: str) -> bool:
     """Verify that the webhook payload was sent by GitHub."""
     if not WEBHOOK_SECRET:
-        return True # Skip if not configured (for local dev)
+        print("Warning: GITHUB_WEBHOOK_SECRET not set. Signature verification skipped.")
+        return True 
     
     if not signature:
         return False
         
-    sha_name, signature_val = signature.split('=')
-    if sha_name != 'sha256':
+    try:
+        sha_name, signature_val = signature.split('=')
+        if sha_name != 'sha256':
+            return False
+            
+        mac = hmac.new(WEBHOOK_SECRET.encode(), msg=payload, digestmod=hashlib.sha256)
+        return hmac.compare_digest(mac.hexdigest(), signature_val)
+    except Exception as e:
+        print(f"Error verifying signature: {e}")
         return False
-        
-    mac = hmac.new(WEBHOOK_SECRET.encode(), msg=payload, digestmod=hashlib.sha256)
-    return hmac.compare_digest(mac.hexdigest(), signature_val)
 
 def get_jwt() -> str:
     """Generate a JWT to authenticate as the GitHub App."""
     if not APP_ID or not PRIVATE_KEY:
-        raise Exception("GITHUB_APP_ID or GITHUB_PRIVATE_KEY not configured")
+        raise ValueError("GITHUB_APP_ID or GITHUB_PRIVATE_KEY is missing. App authentication unavailable.")
     
     # Check if PRIVATE_KEY is a file path or the content itself
     pem_content = PRIVATE_KEY
-    if os.path.exists(PRIVATE_KEY):
-        with open(PRIVATE_KEY, "r") as f:
-            pem_content = f.read()
+    try:
+        if os.path.exists(PRIVATE_KEY):
+            with open(PRIVATE_KEY, "r") as f:
+                pem_content = f.read()
+    except Exception:
+        pass # If it's the key itself but with weird characters, keep it as is
 
-    now = int(time.time())
-    payload = {
-        "iat": now - 60,
-        "exp": now + (10 * 60),
-        "iss": APP_ID
-    }
-    return jwt.encode(payload, pem_content, algorithm="RS256")
+    try:
+        now = int(time.time())
+        payload = {
+            "iat": now - 60,
+            "exp": now + (10 * 60),
+            "iss": APP_ID
+        }
+        return jwt.encode(payload, pem_content, algorithm="RS256")
+    except Exception as e:
+        raise ValueError(f"Failed to generate JWT: {e}")
 
 async def get_installation_token(installation_id: int) -> str:
     """Get an installation-specific access token."""
