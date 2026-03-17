@@ -38,29 +38,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_db():
-    Base.metadata.create_all(bind=engine)
-    # Simple migration for SQLite: add cached columns if they don't exist
+def run_migrations():
+    """Run migrations once at startup."""
+    from sqlalchemy import text
     db = SessionLocal()
     try:
-        from sqlalchemy import text
-        try:
-            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_appstore_note TEXT"))
-            db.commit()
-        except: pass
-        try:
-            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_appstore_source TEXT"))
-            db.commit()
-        except: pass
-        try:
-            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_googleplay_note TEXT"))
-            db.commit()
-        except: pass
-        try:
-            db.execute(text("ALTER TABLE release_drafts ADD COLUMN cached_googleplay_source TEXT"))
-            db.commit()
-        except: pass
+        # These columns were added later in development. 
+        # We try to add them if they don't exist.
+        columns = [
+            "cached_appstore_note", "cached_appstore_source",
+            "cached_googleplay_note", "cached_googleplay_source"
+        ]
+        for col in columns:
+            try:
+                db.execute(text(f"ALTER TABLE release_drafts ADD COLUMN {col} TEXT"))
+                db.commit()
+            except Exception:
+                db.rollback() # Crucial for Postgres: rollback the failed statement
         
+    finally:
+        db.close()
+
+# Run migrations once when the module loads
+Base.metadata.create_all(bind=engine)
+run_migrations()
+
+def get_db():
+    db = SessionLocal()
+    try:
         yield db
     finally:
         db.close()
