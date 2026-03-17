@@ -1,9 +1,13 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+import github_app as gh_app
+import hmac
+import hashlib
+import json
 
 # Database setup
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -84,40 +88,116 @@ async def create_draft_release(payload: ReleasePayload):
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        commits_text = "\n".join([f"- {c.message} ({c.author})" for c in payload.commits])
-        diffs_text = ""
-        for f in payload.files:
-            diff_text = f.patch if f.patch else ""
-            diffs_text += f"\nFile: {f.filename} (+{f.additions}/-{f.deletions})\n{diff_text}\n---"
-            
-        try:
-            notes = await get_generated_notes(commits_text, diffs_text)
-        except Exception as e:
-            # Fallback notes
-            notes = {
-                "technical": f"AI generation failed: {str(e)}",
-                "marketing": "AI generation is temporarily unavailable.",
-                "hype": "AI is taking a break! ☕"
-            }
-            
-        db_draft = ReleaseDraft(
-            repository=payload.repository,
-            base_ref=payload.base_ref,
-            head_ref=payload.head_ref,
-            technical_note=notes.get("technical", "N/A"),
-            marketing_note=notes.get("marketing", "N/A"),
-            hype_note=notes.get("hype", "N/A"),
-            status="pending"
-        )
-        
-        db.add(db_draft)
-        db.commit()
-        db.refresh(db_draft)
-        return {"message": "Draft created successfully", "id": db_draft.id}
+        return await process_release_payload(payload, db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
+async def process_release_payload(payload: ReleasePayload, db: Session):
+    """Internal helper to process a release payload and generate AI notes."""
+    commits_text = "\n".join([f"- {c.message} ({c.author})" for c in payload.commits])
+    diffs_text = ""
+    for f in payload.files:
+        diff_text = f.patch if f.patch else ""
+        diffs_text += f"\nFile: {f.filename} (+{f.additions}/-{f.deletions})\n{diff_text}\n---"
+        
+    try:
+        notes = await get_generated_notes(commits_text, diffs_text)
+    except Exception as e:
+        # Fallback notes
+        notes = {
+            "technical": f"AI generation failed: {str(e)}",
+            "marketing": "AI generation is temporarily unavailable.",
+            "hype": "AI is taking a break! ☕"
+        }
+        
+    db_draft = ReleaseDraft(
+        repository=payload.repository,
+        base_ref=payload.base_ref,
+        head_ref=payload.head_ref,
+        technical_note=notes.get("technical", "N/A"),
+        marketing_note=notes.get("marketing", "N/A"),
+        hype_note=notes.get("hype", "N/A"),
+        status="pending"
+    )
+    
+    db.add(db_draft)
+    db.commit()
+    db.refresh(db_draft)
+    return {"message": "Draft created successfully", "id": db_draft.id}
+
+@app.post("/webhook")
+async def github_webhook(
+    request: Request,
+    x_github_event: str = Header(None),
+    x_hub_signature_256: str = Header(None)
+):
+    body = await request.body()
+    
+    # 1. Verify Signature
+    if not gh_app.verify_signature(body, x_hub_signature_256):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    # 2. Handle Installation
+    if x_github_event == "installation":
+        action = payload.get("action")
+        install_id = payload.get("installation", {}).get("id")
+        repos = [r.get("full_name") for r in payload.get("repositories", [])]
+        print(f"App {action} on installation {install_id} for Repos: {repos}")
+        return {"status": "accepted"}
+
+    # 3. Handle Push (Primary trigger for release notes)
+    if x_github_event == "push":
+        # Only trigger on default branch (optional, but standard for SaaS releases)
+        ref = payload.get("ref", "")
+        repo_data = payload.get("repository", {})
+        default_branch = repo_data.get("default_branch", "main")
+        
+        if ref != f"refs/heads/{default_branch}":
+            return {"status": "ignored", "reason": "Not a push to default branch"}
+            
+        owner = repo_data.get("owner", {}).get("login")
+        repo_name = repo_data.get("name")
+        installation_id = payload.get("installation", {}).get("id")
+        
+        if not installation_id:
+             return {"status": "error", "reason": "No installation ID found"}
+
+        # Compare push with previous commit
+        base = payload.get("before")
+        head = payload.get("after")
+        
+        # Fresh branch/no before
+        if base == "0000000000000000000000000000000000000000":
+            return {"status": "ignored", "reason": "Fresh branch"}
+
+        # Fetch compare data from GitHub
+        compare_data = await gh_app.get_repo_compare(owner, repo_name, base, head, installation_id)
+        
+        # Transform to our internal model
+        internal_payload_dict = gh_app.parse_compare_payload(compare_data)
+        internal_payload_dict["repository"] = f"{owner}/{repo_name}"
+        internal_payload_dict["base_ref"] = base[:7]
+        internal_payload_dict["head_ref"] = head[:7]
+        
+        internal_payload = ReleasePayload(**internal_payload_dict)
+        
+        # Process and save
+        db = SessionLocal()
+        try:
+            await process_release_payload(internal_payload, db)
+        finally:
+            db.close()
+            
+        return {"status": "success", "triggered": True}
+
+    return {"status": "ignored", "event": x_github_event}
 
 @app.get("/drafts")
 def get_drafts(db: Session = Depends(get_db)):
