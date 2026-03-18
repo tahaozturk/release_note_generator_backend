@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Optional
 from jose import jwt, JWTError
+import jwt as pyjwt
+from jwt import PyJWKClient
 from pydantic import BaseModel
 try:
     import github_app as gh_app
@@ -40,19 +42,47 @@ security = HTTPBearer()
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     try:
-        secret = os.environ.get("SUPABASE_JWT_SECRET")
-        if not secret:
-            print("WARNING: SUPABASE_JWT_SECRET is not configured.")
-            raise HTTPException(status_code=500, detail="Server auth configuration error")
+        # Check token headers to determine symmetric (HS256) vs asymmetric (ES256)
+        unverified_header = pyjwt.get_unverified_header(token)
+        alg = unverified_header.get("alg")
+        
+        if alg == "HS256":
+            secret = os.environ.get("SUPABASE_JWT_SECRET")
+            if not secret:
+                print("WARNING: SUPABASE_JWT_SECRET is not configured.")
+                raise HTTPException(status_code=500, detail="Server auth configuration error")
+                
+            payload = pyjwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"verify_exp": True}
+            )
+        else:
+            # Handle ES256 or RS256 by fetching from JWKS endpoint
+            unverified_payload = pyjwt.decode(token, options={"verify_signature": False})
+            iss = unverified_payload.get("iss")
+            if not iss:
+                raise HTTPException(status_code=401, detail="Invalid token: missing issuer")
+                
+            anon_key = os.environ.get("SUPABASE_ANON_KEY")
+            if not anon_key:
+                raise HTTPException(status_code=500, detail="SUPABASE_ANON_KEY is missing but required for ES256 tokens")
+                
+            jwks_client = PyJWKClient(f"{iss}/jwks", headers={"apikey": anon_key})
+            signing_key = jwks_client.get_signing_key_from_jwt(token)
             
-        payload = jwt.decode(
-            token,
-            secret,
-            algorithms=["HS256"],
-            options={"verify_aud": False}
-        )
+            payload = pyjwt.decode(
+                token, 
+                signing_key.key, 
+                algorithms=[alg], 
+                audience="authenticated", 
+                options={"verify_exp": True}
+            )
+            
         return payload
-    except JWTError as e:
+    except Exception as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 # Setup CORS for Frontend
