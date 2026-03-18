@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Optional
 from jose import jwt, JWTError
+from pydantic import BaseModel
 try:
     import github_app as gh_app
 except ImportError:
@@ -28,7 +29,7 @@ else:
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-from models import Base, ReleaseDraft, CommitInput, FileInput, ReleasePayload, ReformatRequest, TranslateRequest
+from models import Base, ReleaseDraft, GitHubInstallation, CommitInput, FileInput, ReleasePayload, ReformatRequest, TranslateRequest
 from ai import get_generated_notes, reformat_content, translate_content
 Base.metadata.create_all(bind=engine)
 
@@ -76,7 +77,8 @@ def run_migrations():
         # We try to add them if they don't exist.
         columns = [
             "cached_appstore_note", "cached_appstore_source",
-            "cached_googleplay_note", "cached_googleplay_source"
+            "cached_googleplay_note", "cached_googleplay_source",
+            "user_id"
         ]
         for col in columns:
             try:
@@ -113,13 +115,13 @@ async def create_draft_release(payload: ReleasePayload):
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        return await process_release_payload(payload, db)
+        return await process_release_payload(payload, db, user_id=None)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
-async def process_release_payload(payload: ReleasePayload, db: Session):
+async def process_release_payload(payload: ReleasePayload, db: Session, user_id: str = None):
     """Internal helper to process a release payload and generate AI notes."""
     commits_text = "\n".join([f"- {c.message} ({c.author})" for c in payload.commits])
     diffs_text = ""
@@ -144,7 +146,8 @@ async def process_release_payload(payload: ReleasePayload, db: Session):
         technical_note=notes.get("technical", "N/A"),
         marketing_note=notes.get("marketing", "N/A"),
         hype_note=notes.get("hype", "N/A"),
-        status="pending"
+        status="pending",
+        user_id=user_id
     )
     
     db.add(db_draft)
@@ -234,7 +237,10 @@ async def github_webhook(
             
             db = SessionLocal()
             try:
-                await process_release_payload(internal_payload, db)
+                # Find the mapped user_id
+                installation = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).first()
+                user_id = installation.user_id if installation else None
+                await process_release_payload(internal_payload, db, user_id)
             finally:
                 db.close()
                 
@@ -247,8 +253,32 @@ async def github_webhook(
 
 @app.get("/drafts")
 def get_drafts(db: Session = Depends(get_db), token: dict = Depends(verify_token)):
-    drafts = db.query(ReleaseDraft).all()
+    user_id = token.get("sub")
+    if user_id:
+        drafts = db.query(ReleaseDraft).filter(ReleaseDraft.user_id == user_id).all()
+    else:
+        drafts = []
     return drafts
+
+class InstallationInput(BaseModel):
+    installation_id: int
+
+@app.post("/installations")
+def register_installation(req: InstallationInput, db: Session = Depends(get_db), token: dict = Depends(verify_token)):
+    user_id = token.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID missing from token")
+    
+    existing = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == req.installation_id).first()
+    if existing:
+        if existing.user_id != user_id:
+            existing.user_id = user_id
+            db.commit()
+    else:
+        new_inst = GitHubInstallation(user_id=user_id, installation_id=req.installation_id)
+        db.add(new_inst)
+        db.commit()
+    return {"message": "Installation registered"}
 
 @app.delete("/drafts/{draft_id}")
 def delete_draft(draft_id: int, db: Session = Depends(get_db), token: dict = Depends(verify_token)):

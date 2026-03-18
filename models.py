@@ -5,10 +5,17 @@ from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
+class GitHubInstallation(Base):
+    __tablename__ = "github_installations"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True) # Extracted from Supabase JWT sub
+    installation_id = Column(Integer, unique=True, index=True)
+
 # SQLAlchemy Database Model
 class ReleaseDraft(Base):
     __tablename__ = "release_drafts"
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=True)
     repository = Column(String, index=True)
     base_ref = Column(String)
     head_ref = Column(String)
