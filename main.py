@@ -3,7 +3,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from fastapi import FastAPI, Depends, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Optional
+from jose import jwt, JWTError
 try:
     import github_app as gh_app
 except ImportError:
@@ -31,6 +33,26 @@ from ai import get_generated_notes, reformat_content, translate_content
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Release Note Architect API")
+
+security = HTTPBearer()
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        secret = os.environ.get("SUPABASE_JWT_SECRET")
+        if not secret:
+            print("WARNING: SUPABASE_JWT_SECRET is not configured.")
+            raise HTTPException(status_code=500, detail="Server auth configuration error")
+            
+        payload = jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            options={"verify_aud": False}
+        )
+        return payload
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 # Setup CORS for Frontend
 app.add_middleware(
@@ -224,12 +246,12 @@ async def github_webhook(
     return {"status": "ignored", "event": x_github_event}
 
 @app.get("/drafts")
-def get_drafts(db: Session = Depends(get_db)):
+def get_drafts(db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     drafts = db.query(ReleaseDraft).all()
     return drafts
 
 @app.delete("/drafts/{draft_id}")
-def delete_draft(draft_id: int, db: Session = Depends(get_db)):
+def delete_draft(draft_id: int, db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     draft = db.query(ReleaseDraft).filter(ReleaseDraft.id == draft_id).first()
     if draft:
         db.delete(draft)
@@ -238,7 +260,7 @@ def delete_draft(draft_id: int, db: Session = Depends(get_db)):
     raise HTTPException(status_code=404, detail="Draft not found")
 
 @app.post("/reformat")
-async def api_reformat_content(req: ReformatRequest, db: Session = Depends(get_db)):
+async def api_reformat_content(req: ReformatRequest, db: Session = Depends(get_db), token: dict = Depends(verify_token)):
     try:
         draft = db.query(ReleaseDraft).filter(ReleaseDraft.id == req.draft_id).first()
         if not draft:
@@ -269,7 +291,7 @@ async def api_reformat_content(req: ReformatRequest, db: Session = Depends(get_d
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/translate")
-async def api_translate_content(req: TranslateRequest):
+async def api_translate_content(req: TranslateRequest, token: dict = Depends(verify_token)):
     try:
         translations = await translate_content(req.content, req.target_languages)
         return translations
