@@ -1,20 +1,19 @@
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
-from fastapi import FastAPI, Depends, HTTPException, Request, Header
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Optional
-from jose import jwt, JWTError
+
 import jwt as pyjwt
-from jwt import PyJWKClient
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from supabase import Client, create_client
+
 try:
     import github_app as gh_app
 except ImportError:
     gh_app = None
-import hmac
-import hashlib
 import json
 
 # Database setup
@@ -27,63 +26,61 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     db_path = os.path.join(BASE_DIR, "release_notes_final.db").replace("\\", "/")
     SQLALCHEMY_DATABASE_URL = f"sqlite:///{db_path}"
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-from models import Base, ReleaseDraft, GitHubInstallation, CommitInput, FileInput, ReleasePayload, ReformatRequest, TranslateRequest
 from ai import get_generated_notes, reformat_content, translate_content
+from models import (
+    Base,
+    CommitInput,
+    FileInput,
+    GitHubInstallation,
+    ReformatRequest,
+    ReleaseDraft,
+    ReleasePayload,
+    TranslateRequest,
+)
+
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Release Note Architect API")
 
 security = HTTPBearer()
 
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     try:
-        # Check token headers to determine symmetric (HS256) vs asymmetric (ES256)
-        unverified_header = pyjwt.get_unverified_header(token)
-        alg = unverified_header.get("alg")
-        
-        if alg == "HS256":
-            secret = os.environ.get("SUPABASE_JWT_SECRET")
-            if not secret:
-                print("WARNING: SUPABASE_JWT_SECRET is not configured.")
-                raise HTTPException(status_code=500, detail="Server auth configuration error")
-                
-            payload = pyjwt.decode(
-                token,
-                secret,
-                algorithms=["HS256"],
-                audience="authenticated",
-                options={"verify_exp": True}
+        # Extract the Supabase URL dynamically from the token issuer
+        unverified_payload = pyjwt.decode(token, options={"verify_signature": False})
+        iss = unverified_payload.get("iss")
+        if not iss:
+            raise HTTPException(status_code=401, detail="Invalid token: missing issuer")
+
+        supabase_url = iss.replace("/auth/v1", "")
+        anon_key = os.environ.get("SUPABASE_ANON_KEY")
+
+        if not anon_key:
+            raise HTTPException(
+                status_code=500,
+                detail="SUPABASE_ANON_KEY environment variable is required",
             )
-        else:
-            # Handle ES256 or RS256 by fetching from JWKS endpoint
-            unverified_payload = pyjwt.decode(token, options={"verify_signature": False})
-            iss = unverified_payload.get("iss")
-            if not iss:
-                raise HTTPException(status_code=401, detail="Invalid token: missing issuer")
-                
-            anon_key = os.environ.get("SUPABASE_ANON_KEY")
-            if not anon_key:
-                raise HTTPException(status_code=500, detail="SUPABASE_ANON_KEY is missing but required for ES256 tokens")
-                
-            jwks_client = PyJWKClient(f"{iss}/jwks", headers={"apikey": anon_key})
-            signing_key = jwks_client.get_signing_key_from_jwt(token)
-            
-            payload = pyjwt.decode(
-                token, 
-                signing_key.key, 
-                algorithms=[alg], 
-                audience="authenticated", 
-                options={"verify_exp": True}
-            )
-            
-        return payload
+
+        # Use the official Supabase SDK, which securely handles all algorithms (ES256, HS256) via the /auth/v1/user endpoint
+        supabase: Client = create_client(supabase_url, anon_key)
+        user_resp = supabase.auth.get_user(token)
+
+        if not user_resp or not user_resp.user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        # We must return a dictionary payload mapping `sub` to the user ID to match the rest of the backend
+        return {"sub": user_resp.user.id}
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
 
 # Setup CORS for Frontend
 app.add_middleware(
@@ -91,38 +88,44 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "https://release-note-generator-frontend.vercel.app",
-        "https://release-note-generator-frontend.vercel.app/", # With slash just in case
+        "https://release-note-generator-frontend.vercel.app/",  # With slash just in case
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 def run_migrations():
     """Run migrations once at startup."""
     from sqlalchemy import text
+
     db = SessionLocal()
     try:
-        # These columns were added later in development. 
+        # These columns were added later in development.
         # We try to add them if they don't exist.
         columns = [
-            "cached_appstore_note", "cached_appstore_source",
-            "cached_googleplay_note", "cached_googleplay_source",
-            "user_id"
+            "cached_appstore_note",
+            "cached_appstore_source",
+            "cached_googleplay_note",
+            "cached_googleplay_source",
+            "user_id",
         ]
         for col in columns:
             try:
                 db.execute(text(f"ALTER TABLE release_drafts ADD COLUMN {col} TEXT"))
                 db.commit()
             except Exception:
-                db.rollback() # Crucial for Postgres: rollback the failed statement
-        
+                db.rollback()  # Crucial for Postgres: rollback the failed statement
+
     finally:
         db.close()
+
 
 # Run migrations once when the module loads
 Base.metadata.create_all(bind=engine)
 run_migrations()
+
 
 def get_db():
     db = SessionLocal()
@@ -131,13 +134,16 @@ def get_db():
     finally:
         db.close()
 
+
 @app.get("/")
 async def root():
     return {"message": "Release Note Architect Backend is Running", "docs": "/docs"}
 
+
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
 
 @app.post("/draft-release")
 async def create_draft_release(payload: ReleasePayload):
@@ -151,14 +157,19 @@ async def create_draft_release(payload: ReleasePayload):
     finally:
         db.close()
 
-async def process_release_payload(payload: ReleasePayload, db: Session, user_id: str = None):
+
+async def process_release_payload(
+    payload: ReleasePayload, db: Session, user_id: str = None
+):
     """Internal helper to process a release payload and generate AI notes."""
     commits_text = "\n".join([f"- {c.message} ({c.author})" for c in payload.commits])
     diffs_text = ""
     for f in payload.files:
         diff_text = f.patch if f.patch else ""
-        diffs_text += f"\nFile: {f.filename} (+{f.additions}/-{f.deletions})\n{diff_text}\n---"
-        
+        diffs_text += (
+            f"\nFile: {f.filename} (+{f.additions}/-{f.deletions})\n{diff_text}\n---"
+        )
+
     try:
         notes = await get_generated_notes(commits_text, diffs_text)
     except Exception as e:
@@ -166,9 +177,9 @@ async def process_release_payload(payload: ReleasePayload, db: Session, user_id:
         notes = {
             "technical": f"AI generation failed: {str(e)}",
             "marketing": "AI generation is temporarily unavailable.",
-            "hype": "AI is taking a break! ☕"
+            "hype": "AI is taking a break! ☕",
         }
-        
+
     db_draft = ReleaseDraft(
         repository=payload.repository,
         base_ref=payload.base_ref,
@@ -177,32 +188,36 @@ async def process_release_payload(payload: ReleasePayload, db: Session, user_id:
         marketing_note=notes.get("marketing", "N/A"),
         hype_note=notes.get("hype", "N/A"),
         status="pending",
-        user_id=user_id
+        user_id=user_id,
     )
-    
+
     db.add(db_draft)
     db.commit()
     db.refresh(db_draft)
     return {"message": "Draft created successfully", "id": db_draft.id}
 
+
 @app.post("/webhook")
 async def github_webhook(
     request: Request,
     x_github_event: str = Header(None),
-    x_hub_signature_256: str = Header(None)
+    x_hub_signature_256: str = Header(None),
 ):
     body = await request.body()
-    
+
     # Check if dependencies are loaded
     if gh_app is None:
-        return {"status": "error", "reason": "GitHub App dependencies (PyJWT/cryptography) are not installed on the server."}
-    
+        return {
+            "status": "error",
+            "reason": "GitHub App dependencies (PyJWT/cryptography) are not installed on the server.",
+        }
+
     # 1. Verify Signature (Graceful fallback if secret is missing)
     if not gh_app.verify_signature(body, x_hub_signature_256):
         # We only strictly enforce if the secret is configured
         if os.environ.get("GITHUB_WEBHOOK_SECRET"):
             raise HTTPException(status_code=401, detail="Invalid signature")
-    
+
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
@@ -219,67 +234,81 @@ async def github_webhook(
     # 3. Handle Push
     if x_github_event == "push":
         # Check if App config is present before attempting to use it
-        if not os.environ.get("GITHUB_APP_ID") or not os.environ.get("GITHUB_PRIVATE_KEY"):
-            return {"status": "error", "reason": "GitHub App configuration missing on server. Webhook cannot be processed."}
+        if not os.environ.get("GITHUB_APP_ID") or not os.environ.get(
+            "GITHUB_PRIVATE_KEY"
+        ):
+            return {
+                "status": "error",
+                "reason": "GitHub App configuration missing on server. Webhook cannot be processed.",
+            }
 
         ref = payload.get("ref", "")
         repo_data = payload.get("repository", {})
         default_branch = repo_data.get("default_branch", "main")
-        
+
         if ref != f"refs/heads/{default_branch}":
             return {"status": "ignored", "reason": "Not a push to default branch"}
-            
+
         owner = repo_data.get("owner", {}).get("login")
         repo_name = repo_data.get("name")
         installation_id = payload.get("installation", {}).get("id")
-        
+
         if not installation_id:
-             return {"status": "error", "reason": "No installation ID found"}
+            return {"status": "error", "reason": "No installation ID found"}
 
         base = payload.get("before")
         head = payload.get("after")
-        
+
         print(f"Processing PUSH event: {owner}/{repo_name} | {base} -> {head}")
-        
+
         # Fresh branch/Initial push
         if base == "0000000000000000000000000000000000000000":
             # Instead of ignoring, we try to compare with the parent of head
-            # GitHub supports 'HEAD^' or just fetching the commit alone, 
+            # GitHub supports 'HEAD^' or just fetching the commit alone,
             # but comparison works best with SHAs.
             # We'll try to fetch the commit data directly if base is zero.
-            print(f"Initial push detected for {repo_name}. Attempting to fetch head commit data.")
+            print(
+                f"Initial push detected for {repo_name}. Attempting to fetch head commit data."
+            )
             # We'll let get_repo_compare attempt to handle it or we can fallback
             # to comparing head with itself or head^.
             # For simplicity in this PR, we'll try comparing head^...head if it's a commit
-            base = f"{head}^" 
+            base = f"{head}^"
 
         try:
             # Fetch compare data from GitHub
-            compare_data = await gh_app.get_repo_compare(owner, repo_name, base, head, installation_id)
-            
+            compare_data = await gh_app.get_repo_compare(
+                owner, repo_name, base, head, installation_id
+            )
+
             # Transform and save
             internal_payload_dict = gh_app.parse_compare_payload(compare_data)
             internal_payload_dict["repository"] = f"{owner}/{repo_name}"
             internal_payload_dict["base_ref"] = base[:7]
             internal_payload_dict["head_ref"] = head[:7]
-            
+
             internal_payload = ReleasePayload(**internal_payload_dict)
-            
+
             db = SessionLocal()
             try:
                 # Find the mapped user_id
-                installation = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).first()
+                installation = (
+                    db.query(GitHubInstallation)
+                    .filter(GitHubInstallation.installation_id == installation_id)
+                    .first()
+                )
                 user_id = installation.user_id if installation else None
                 await process_release_payload(internal_payload, db, user_id)
             finally:
                 db.close()
-                
+
             return {"status": "success", "triggered": True}
         except Exception as e:
             print(f"Error processing webhook: {e}")
             return {"status": "error", "reason": str(e)}
 
     return {"status": "ignored", "event": x_github_event}
+
 
 @app.get("/drafts")
 def get_drafts(db: Session = Depends(get_db), token: dict = Depends(verify_token)):
@@ -290,28 +319,43 @@ def get_drafts(db: Session = Depends(get_db), token: dict = Depends(verify_token
         drafts = []
     return drafts
 
+
 class InstallationInput(BaseModel):
     installation_id: int
 
+
 @app.post("/installations")
-def register_installation(req: InstallationInput, db: Session = Depends(get_db), token: dict = Depends(verify_token)):
+def register_installation(
+    req: InstallationInput,
+    db: Session = Depends(get_db),
+    token: dict = Depends(verify_token),
+):
     user_id = token.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID missing from token")
-    
-    existing = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == req.installation_id).first()
+
+    existing = (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.installation_id == req.installation_id)
+        .first()
+    )
     if existing:
         if existing.user_id != user_id:
             existing.user_id = user_id
             db.commit()
     else:
-        new_inst = GitHubInstallation(user_id=user_id, installation_id=req.installation_id)
+        new_inst = GitHubInstallation(
+            user_id=user_id, installation_id=req.installation_id
+        )
         db.add(new_inst)
         db.commit()
     return {"message": "Installation registered"}
 
+
 @app.delete("/drafts/{draft_id}")
-def delete_draft(draft_id: int, db: Session = Depends(get_db), token: dict = Depends(verify_token)):
+def delete_draft(
+    draft_id: int, db: Session = Depends(get_db), token: dict = Depends(verify_token)
+):
     draft = db.query(ReleaseDraft).filter(ReleaseDraft.id == draft_id).first()
     if draft:
         db.delete(draft)
@@ -319,24 +363,37 @@ def delete_draft(draft_id: int, db: Session = Depends(get_db), token: dict = Dep
         return {"message": "Deleted"}
     raise HTTPException(status_code=404, detail="Draft not found")
 
+
 @app.post("/reformat")
-async def api_reformat_content(req: ReformatRequest, db: Session = Depends(get_db), token: dict = Depends(verify_token)):
+async def api_reformat_content(
+    req: ReformatRequest,
+    db: Session = Depends(get_db),
+    token: dict = Depends(verify_token),
+):
     try:
         draft = db.query(ReleaseDraft).filter(ReleaseDraft.id == req.draft_id).first()
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
-        
+
         # Check Cache (Ensure the generated output matches the *exact* input source)
-        if req.platform == "appstore" and draft.cached_appstore_note and draft.cached_appstore_source == req.content:
+        if (
+            req.platform == "appstore"
+            and draft.cached_appstore_note
+            and draft.cached_appstore_source == req.content
+        ):
             return {"content": draft.cached_appstore_note}
-        if req.platform == "googleplay" and draft.cached_googleplay_note and draft.cached_googleplay_source == req.content:
+        if (
+            req.platform == "googleplay"
+            and draft.cached_googleplay_note
+            and draft.cached_googleplay_source == req.content
+        ):
             return {"content": draft.cached_googleplay_note}
         if req.platform == "markdown":
             return {"content": req.content}
 
         # Call AI if not cached or source changed
         reformatted = await reformat_content(req.content, req.platform)
-        
+
         # Save to Cache and track source
         if req.platform == "appstore":
             draft.cached_appstore_note = reformatted
@@ -344,14 +401,17 @@ async def api_reformat_content(req: ReformatRequest, db: Session = Depends(get_d
         elif req.platform == "googleplay":
             draft.cached_googleplay_note = reformatted
             draft.cached_googleplay_source = req.content
-        
+
         db.commit()
         return {"content": reformatted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/translate")
-async def api_translate_content(req: TranslateRequest, token: dict = Depends(verify_token)):
+async def api_translate_content(
+    req: TranslateRequest, token: dict = Depends(verify_token)
+):
     try:
         translations = await translate_content(req.content, req.target_languages)
         return translations
