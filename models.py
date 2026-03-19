@@ -11,6 +11,13 @@ class GitHubInstallation(Base):
     user_id = Column(String, index=True) # Extracted from Supabase JWT sub
     installation_id = Column(Integer, unique=True, index=True)
 
+class RepositorySetting(Base):
+    __tablename__ = "repository_settings"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True)
+    repository = Column(String, index=True) # e.g. "owner/repo"
+    tracking_method = Column(String, default="push") # "push" or "tag"
+
 # SQLAlchemy Database Model
 class ReleaseDraft(Base):
     __tablename__ = "release_drafts"
@@ -62,3 +69,7 @@ class ReformatRequest(BaseModel):
 class TranslateRequest(BaseModel):
     content: str
     target_languages: List[str]
+
+class RepoSettings(BaseModel):
+    repository: str
+    tracking_method: str # "push" or "tag"

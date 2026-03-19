@@ -42,6 +42,8 @@ from models import (
     ReleaseDraft,
     ReleasePayload,
     TranslateRequest,
+    RepositorySetting,
+    RepoSettings,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -256,26 +258,63 @@ async def github_webhook(
         if not installation_id:
             return {"status": "error", "reason": "No installation ID found"}
 
-        base = payload.get("before")
-        head = payload.get("after")
-
-        print(f"Processing PUSH event: {owner}/{repo_name} | {base} -> {head}")
-
-        # Fresh branch/Initial push
-        if base == "0000000000000000000000000000000000000000":
-            # Instead of ignoring, we try to compare with the parent of head
-            # GitHub supports 'HEAD^' or just fetching the commit alone,
-            # but comparison works best with SHAs.
-            # We'll try to fetch the commit data directly if base is zero.
-            print(
-                f"Initial push detected for {repo_name}. Attempting to fetch head commit data."
-            )
-            # We'll let get_repo_compare attempt to handle it or we can fallback
-            # to comparing head with itself or head^.
-            # For simplicity in this PR, we'll try comparing head^...head if it's a commit
-            base = f"{head}^"
-
+        db = SessionLocal()
         try:
+            full_repo_name = f"{owner}/{repo_name}"
+            # Find the mapped user_id
+            installation = (
+                db.query(GitHubInstallation)
+                .filter(GitHubInstallation.installation_id == installation_id)
+                .first()
+            )
+            user_id = installation.user_id if installation else None
+            
+            # Find tracking settings
+            settings = (
+                db.query(RepositorySetting)
+                .filter(RepositorySetting.repository == full_repo_name)
+                .first()
+            )
+            tracking_method = settings.tracking_method if settings else "push"
+
+            base = payload.get("before")
+            head = payload.get("after")
+
+            if tracking_method == "tag":
+                if not ref.startswith("refs/tags/"):
+                    return {"status": "ignored", "reason": "Repo is in 'tag' mode. Push ignored."}
+                
+                new_tag = ref.replace("refs/tags/", "")
+                print(f"Processing TAG push: {new_tag} for {full_repo_name}")
+                
+                # For tags, we need to determine the base (previous tag)
+                all_tags = await gh_app.list_repo_tags(owner, repo_name, installation_id)
+                if len(all_tags) < 2:
+                    # Initial tag or only one tag - fallback to parent or first commit
+                    base = f"{head}^"
+                else:
+                    # GitHub API returns tags in reverse chronological order
+                    if all_tags[0]["name"] == new_tag:
+                        base = all_tags[1]["name"]
+                    else:
+                        base = all_tags[0]["name"]
+                
+                # When comparing by tag names, head is just the tag name itself
+                head = new_tag
+            else:
+                # Standard push mode
+                if ref.startswith("refs/tags/"):
+                    return {"status": "ignored", "reason": "Repo is in 'push' mode. Tag ignored."}
+                
+                if ref != f"refs/heads/{default_branch}":
+                    return {"status": "ignored", "reason": f"Not default branch ({default_branch})"}
+
+            print(f"Processing comparison for {full_repo_name}: {base} -> {head}")
+
+            # Fresh branch/Initial push handling for commits
+            if base == "0000000000000000000000000000000000000000" and not tracking_method == "tag":
+                base = f"{head}^"
+
             # Fetch compare data from GitHub
             compare_data = await gh_app.get_repo_compare(
                 owner, repo_name, base, head, installation_id
@@ -283,31 +322,57 @@ async def github_webhook(
 
             # Transform and save
             internal_payload_dict = gh_app.parse_compare_payload(compare_data)
-            internal_payload_dict["repository"] = f"{owner}/{repo_name}"
-            internal_payload_dict["base_ref"] = base[:7]
-            internal_payload_dict["head_ref"] = head[:7]
+            internal_payload_dict["repository"] = full_repo_name
+            internal_payload_dict["base_ref"] = base[:7] if len(base) > 7 else base
+            internal_payload_dict["head_ref"] = head[:7] if len(head) > 7 else head
 
             internal_payload = ReleasePayload(**internal_payload_dict)
-
-            db = SessionLocal()
-            try:
-                # Find the mapped user_id
-                installation = (
-                    db.query(GitHubInstallation)
-                    .filter(GitHubInstallation.installation_id == installation_id)
-                    .first()
-                )
-                user_id = installation.user_id if installation else None
-                await process_release_payload(internal_payload, db, user_id)
-            finally:
-                db.close()
-
+            await process_release_payload(internal_payload, db, user_id)
             return {"status": "success", "triggered": True}
         except Exception as e:
             print(f"Error processing webhook: {e}")
             return {"status": "error", "reason": str(e)}
+        finally:
+            db.close()
 
     return {"status": "ignored", "event": x_github_event}
+
+
+@app.get("/settings/{owner}/{repo}")
+def get_repository_settings(
+    owner: str, repo: str, db: Session = Depends(get_db), token: dict = Depends(verify_token)
+):
+    user_id = token.get("sub")
+    full_name = f"{owner}/{repo}"
+    settings = (
+        db.query(RepositorySetting)
+        .filter(RepositorySetting.user_id == user_id, RepositorySetting.repository == full_name)
+        .first()
+    )
+    if not settings:
+        return {"repository": full_name, "tracking_method": "push"}
+    return {"repository": full_name, "tracking_method": settings.tracking_method}
+
+
+@app.post("/settings")
+def update_repository_settings(
+    req: RepoSettings, db: Session = Depends(get_db), token: dict = Depends(verify_token)
+):
+    user_id = token.get("sub")
+    settings = (
+        db.query(RepositorySetting)
+        .filter(RepositorySetting.user_id == user_id, RepositorySetting.repository == req.repository)
+        .first()
+    )
+    if settings:
+        settings.tracking_method = req.tracking_method
+    else:
+        settings = RepositorySetting(
+            user_id=user_id, repository=req.repository, tracking_method=req.tracking_method
+        )
+        db.add(settings)
+    db.commit()
+    return {"message": "Settings updated"}
 
 
 @app.get("/drafts")

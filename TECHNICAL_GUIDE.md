@@ -69,7 +69,11 @@ The backend implements a secure token verification system in `main.py`:
 
 ### `github_installations` table
 - **installation_id**: The ID assigned by GitHub when the app is installed.
-- **user_id**: The Supabase UUID of the user who registered this installation in the dashboard.
+- **user_id**: The Supabase UUID of the user who registered this installation.
+
+### `repository_settings` table
+- **repository**: Full name of the repo.
+- **tracking_method**: "push" (every commit) or "tag" (only on version bumps).
 
 ---
 

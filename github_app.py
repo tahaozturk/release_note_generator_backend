@@ -94,6 +94,24 @@ async def get_repo_compare(owner: str, repo: str, base: str, head: str, installa
         resp.raise_for_status()
         return resp.json()
 
+async def list_repo_tags(owner: str, repo: str, installation_id: int) -> List[Dict]:
+    """List all tags for a repository."""
+    token = await get_installation_token(installation_id)
+    url = f"https://api.github.com/repos/{owner}/{repo}/tags"
+    
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            print(f"Error fetching tags: {resp.status_code} {resp.text}")
+            return []
+        return resp.json()
+
 def parse_compare_payload(data: dict):
     """Transform GitHub comparison data into our internal payload format."""
     commits = []
